@@ -156,7 +156,7 @@ By running `mirrorrepo-git init` command, it creates a bare git repository
 which contains all archived objects on the current directory.
 
 In the combined repository directory, there are some other
-bair repositories.
+bare repositories.
 
 *	refs-history/NAME  
 	Repository which holds all reference information in the "refs" file.
