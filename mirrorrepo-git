@@ -1,0 +1,983 @@
+#! /bin/sh
+#
+#
+#	mirrorrepo-git
+#	mirroring tool for multiple git repositories
+#
+#	Copyright (C) 2015 Tsukasa OI.
+#
+#
+#	Permission to use, copy, modify, and/or distribute this software for
+#	any purpose with or without fee is hereby granted, provided that the
+#	above copyright notice and this permission notice appear in all copies.
+#
+#	THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+#	WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+#	MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+#	ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+#	WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+#	ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+#	OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+#
+#
+VERSION=0.2.0-alpha
+COPYRIGHT='Copyright(C) 2015 Tsukasa OI.'
+
+# Basic initialization
+ME="$0"
+case "$ME" in
+/*)
+	ME="${ME##/*/}"
+	;;
+esac
+FIRSTPWD=$(pwd)
+
+
+
+# CUSTOMIZATION : MIRRORREPO_ALWAYS_SECURE
+# If this is true, secure mode is always activated.
+MIRRORREPO_ALWAYS_SECURE=false
+
+
+
+# ENV : GIT
+# Path for git
+if test "${GIT+set}" != set
+then
+	GIT=git
+fi
+export GIT
+"$GIT" --version >/dev/null 2>&1 || {
+	echo "fatal: git command (\`$GIT') seems invalid. cannot continue." 1>&2
+	exit 1
+}
+
+# ENV : MIRRORREPO_WAIT_FETCHES
+# If given, it waits specified seconds between multiple remote fetches.
+if test "${MIRRORREPO_WAIT_FETCHES+set}" != set || test -z "$MIRRORREPO_WAIT_FETCHES"
+then
+	MIRRORREPO_WAIT_FETCHES=0
+fi
+
+# ENV : MIRRORREPO_DIR
+# Path for mirrorrepo combined repository
+if test "${MIRRORREPO_DIR+set}" != set
+then
+	MIRRORREPO_DIR=$(pwd)
+fi
+cd "$MIRRORREPO_DIR" || exit $?
+MIRRORREPO_DIR=$(pwd)
+export MIRRORREPO_DIR
+
+# ENV : MIRRORREPO_CONTINUE
+# If this value is not empty, continue even if fetch fails.
+if test -z "$MIRRORREPO_CONTINUE"
+then
+	MIRRORREPO_CONTINUE=
+fi
+export MIRRORREPO_CONTINUE
+
+# Reset git environment
+unset GIT_DIR 2>/dev/null
+unset GIT_WORK_TREE 2>/dev/null
+
+
+
+# Parse arguments
+COMBINED_REPOSITORY_REQUIREMENT=0
+COMBINED_REPOSITORY_CHECKING=:
+REMOTE_NAME_REQUIRED=false
+MIRROR_SECURE=false
+MIRROR_DEFAULT_HEAD=false
+if $MIRRORREPO_ALWAYS_SECURE
+then
+	MIRROR_SECURE=:
+fi
+if test $# -eq 0
+then
+	OP=-h
+else
+	OP="$1"
+	shift
+fi
+case "$OP" in
+--help | -help | -h)
+	OP=usage
+	COMBINED_REPOSITORY_CHECKING=false
+	;;
+--version | -version | -v | version)
+	OP=version
+	COMBINED_REPOSITORY_CHECKING=false
+	;;
+init)
+	COMBINED_REPOSITORY_REQUIREMENT=1
+	if test $# -ne 0
+	then
+		echo "Usage: $ME init" 1>&2
+		exit 1
+	fi
+	;;
+add)
+	REMOTE_NAME_REQUIREMENT=1
+	REMOTE_NAME_REQUIRED=true
+	if test $# -ne 2
+	then
+		echo "Usage: $ME add NAME URL" 1>&2
+		exit 1
+	fi
+	REMOTE_NAME="$1"
+	REMOTE_URL="$2"
+	;;
+del)
+	REMOTE_NAME_REQUIREMENT=0
+	REMOTE_NAME_REQUIRED=true
+	if test $# -ne 1
+	then
+		echo "Usage: $ME del NAME" 1>&2
+		exit 1
+	fi
+	REMOTE_NAME="$1"
+	;;
+fetch)
+	REMOTE_NAME_REQUIREMENT=0
+	REMOTE_NAME_REQUIRED=true
+	SNAPSHOT_ID=master
+	while test $# -ne 0
+	do
+		case "$1" in
+		--secure) MIRROR_SECURE=: ;;
+		--no-secure) MIRROR_SECURE=false ;;
+		--) shift; break ;;
+		-*)
+			echo "error: unknown argument \`$1'." 1>&2
+			exit 1
+			;;
+		*) break ;;
+		esac
+		shift
+	done
+	if test $# -ne 1
+	then
+		echo "Usage: $ME fetch [--secure] NAME" 1>&2
+		exit 1
+	fi
+	REMOTE_NAME="$1"
+	;;
+fetch-all)
+	while test $# -ne 0
+	do
+		case "$1" in
+		--secure) MIRROR_SECURE=: ;;
+		--no-secure) MIRROR_SECURE=false ;;
+		--) shift; break ;;
+		-*)
+			echo "error: unknown argument \`$1'." 1>&2
+			exit 1
+			;;
+		*) break ;;
+		esac
+		shift
+	done
+	if test $# -ne 0
+	then
+		echo "Usage: $ME fetch-all [--secure]" 1>&2
+		exit 1
+	fi
+	;;
+update)
+	REMOTE_NAME_REQUIREMENT=0
+	REMOTE_NAME_REQUIRED=true
+	SNAPSHOT_ID=master
+	if test $# -ne 1 && test $# -ne 2
+	then
+		echo "Usage: $ME update NAME [SNAPSHOT_ID]" 1>&2
+		exit 1
+	fi
+	REMOTE_NAME="$1"
+	test $# -eq 2 && SNAPSHOT_ID="$2"
+	;;
+update-all)
+	if test $# -ne 0
+	then
+		echo "Usage: $ME update-all" 1>&2
+		exit 1
+	fi
+	;;
+snapshot)
+	REMOTE_NAME_REQUIREMENT=0
+	REMOTE_NAME_REQUIRED=true
+	SNAPSHOT_ID=master
+	if test $# -ne 2 && test $# -ne 3
+	then
+		echo "Usage: $ME snapshot REMOTE_NAME SNAPSHOT_NAME [SNAPSHOT_ID]" 1>&2
+		exit 1
+	fi
+	REMOTE_NAME="$1"
+	SNAPSHOT_NAME="$2"
+	test $# -eq 3 && SNAPSHOT_ID="$3"
+	;;
+export)
+	REMOTE_NAME_REQUIREMENT=0
+	REMOTE_NAME_REQUIRED=true
+	SNAPSHOT_ID=master
+	MIRROR_EXPORT_BARE=:
+	while test $# -ne 0
+	do
+		case "$1" in
+		--secure) MIRROR_SECURE=: ;;
+		--no-secure) MIRROR_SECURE=false ;;
+		--bare) MIRROR_EXPORT_BARE=: ;;
+		--no-bare) MIRROR_EXPORT_BARE=false ;;
+		--default-head) MIRROR_DEFAULT_HEAD=: ;;
+		--no-default-head) MIRROR_DEFAULT_HEAD=false ;;
+		-d | --development-tree)
+			MIRROR_EXPORT_BARE=false
+			MIRROR_DEFAULT_HEAD=:
+			;;
+		--) shift; break ;;
+		-*)
+			echo "error: unknown argument \`$1'." 1>&2
+			exit 1
+			;;
+		*) break ;;
+		esac
+		shift
+	done
+	if test $# -ne 2 && test $# -ne 3
+	then
+		echo "Usage: $ME export [--secure]" 1>&2
+		echo "	[--no-bare|--bare] [--default-head|--no-default-head] [-d]" 1>&2
+		echo "	REMOTE_NAME REPOSITORY_PATH [SNAPSHOT_ID]" 1>&2
+		exit 1
+	fi
+	REMOTE_NAME="$1"
+	SNAPSHOT_NAME="$2"
+	test $# -eq 3 && SNAPSHOT_ID="$3"
+	;;
+clean)
+	if test $# -ne 0
+	then
+		echo "Usage: $ME clean" 1>&2
+		exit 1
+	fi
+	;;
+help)
+	COMBINED_REPOSITORY_CHECKING=false
+	if test $# -ne 0
+	then
+		HELP_CMD="$1"
+	else
+		OP=usage
+	fi
+	;;
+*)
+	COMBINED_REPOSITORY_CHECKING=false
+	OP_="$OP"
+	unset OP
+	while test $# -ne 0
+	do
+		case "$1" in
+		--help | -help | -h)
+			OP=usage
+			;;
+		--version | -version | -v)
+			OP=version
+			;;
+		esac
+		shift
+	done
+	if test "${OP+set}" != set
+	then
+		echo "fatal: unknown argument \`$OP_'." 1>&2
+		exit 1
+	fi
+	unset OP_
+	;;
+esac
+
+
+
+# UTIL: checks whether remote name exists
+# RETURNS:
+#  0 : remote name exists
+#  1 : remote name does not exist
+#  2 : corruption (or data race) detected
+mirrorrepo_remote_exists ()
+{
+	test -d refs-history/$1; T1=$?
+	"$GIT" config --local --get remote.$1.fetch >/dev/null 2>&1; T2=$?
+	test $T1 -ne 0 && T1=1
+	test $T2 -ne 0 && T2=1
+	if test -f refs-history/$1 || test $T1 -ne $T2
+	then
+		return 2
+	else
+		return $T1
+	fi
+}
+
+
+# UTIL: checks whether given name is valid
+# RETURNS:
+#  0 : OK
+#  1 : git check-ref-format failed
+#  2 : name is empty
+#  3 : name contains slashes
+#  4 : name begins with minus
+mirrorrepo_check_name ()
+{
+	case "$1" in
+	'')  return 2 ;;
+	*/*) return 3 ;;
+	-*)  return 4 ;;
+	esac
+	"$GIT" check-ref-format --allow-onelevel "$1" 2>/dev/null || return 1
+	return 0
+}
+
+
+# UTIL: validates whether given name is valid
+# PARAMETERS:
+#  $1 : name
+#  $2 : name category (used to print messages)
+mirrorrepo_validate_name ()
+{
+	mirrorrepo_check_name "$1"
+	case $? in
+	0) return 0 ;;
+	1) echo "error: $2 name \`$1' is invalid." 1>&2 ;;
+	2) echo "error: $2 name must not be empty." 1>&2 ;;
+	3) echo "error: $2 name \`$1' must not contain slashes." 1>&2 ;;
+	4) echo "error: $2 name \`$1' must not begin with \`-'." 1>&2 ;;
+	esac
+	return 1
+}
+
+
+# If command requires valid remote repository NAME
+if $REMOTE_NAME_REQUIRED
+then
+	mirrorrepo_validate_name "$REMOTE_NAME" remote || exit $?
+	mirrorrepo_remote_exists $REMOTE_NAME; E=$?
+	if test $REMOTE_NAME_REQUIREMENT -ne $E
+	then
+		if test $E -eq 2
+		then
+			echo "fatal: data corruption detected while checking remote \`$REMOTE_NAME'." 1>&2
+		fi
+		case $REMOTE_NAME_REQUIREMENT in
+		0) echo "error: remote \`$REMOTE_NAME' does not exist." 1>&2 ;;
+		*) echo "error: remote \`$REMOTE_NAME' already exists." 1>&2 ;;
+		esac
+		exit 1
+	fi
+fi
+
+
+
+# UTIL: checks if current directory looks combined repository
+mirrorrepo_check_pwd ()
+{
+	test -d refs-history && test -d mirrors && test -d snapshots &&
+	test -d objects && test -r config && test -r HEAD &&
+	test -r tag.mirrorrepo || return 1
+	return 0
+}
+
+
+# If command has requirements for combined repository
+if $COMBINED_REPOSITORY_CHECKING
+then
+	mirrorrepo_check_pwd; E=$?
+	if test $COMBINED_REPOSITORY_REQUIREMENT -ne $E
+	then
+		case $COMBINED_REPOSITORY_REQUIREMENT in
+		0) echo "error: \`$MIRRORREPO_DIR' is not a valid combined repository." 1>&2 ;;
+		*) echo "error: \`$MIRRORREPO_DIR' is already a valid combined repository." 1>&2 ;;
+		esac
+		exit 1
+	fi
+fi
+
+
+
+# UTIL: setup a snapshot repository
+# PARAMETERS:
+#  $1 : snapshot directory
+#  $2 : alternates path
+#  $3 : bare mode
+mirrorrepo_setup_snapshot ()
+{
+	ARGS=init
+	if $3
+	then
+		ARGS='init --bare'
+		export GIT_DIR="$1"
+		unset GIT_WORK_TREE 2>/dev/null
+	else
+		export GIT_DIR="$1/.git"
+		export GIT_WORK_TREE="$1"
+	fi
+	"$GIT" $ARGS || {
+		echo "error: cannot initialize a snapshot." 1>&2
+		rm -r -f "$1"
+		unset GIT_WORK_TREE 2>/dev/null
+		unset GIT_DIR
+		return 1
+	}
+	if test ! -d "$GIT_DIR/objects/info"
+	then
+		mkdir -p "$GIT_DIR/objects/info" || {
+			echo "error: cannot set up a snapshot." 1>&2
+			rm -r -f "$1"
+			unset GIT_WORK_TREE 2>/dev/null
+			unset GIT_DIR
+			return 1
+		}
+	fi
+	touch "$GIT_DIR/objects/info/alternates" || {
+		echo "error: cannot set up alternates for snapshot." 1>&2
+		rm -r -f "$1"
+		unset GIT_WORK_TREE 2>/dev/null
+		unset GIT_DIR
+		return 1
+	}
+	echo "$2" >"$GIT_DIR/objects/info/alternates"
+	unset GIT_WORK_TREE 2>/dev/null
+	unset GIT_DIR
+	return 0
+}
+
+
+# UTIL: make a snapshot
+# PARAMETERS:
+#  $1 : snapshot directory
+#  $2 : alternates path
+#  $3 : bare mode
+#  $4 : name prefix (optional)
+mirrorrepo_create_snapshot ()
+{
+	# create mirror repository if needed
+	if test ! -d "$1"
+	then
+		mkdir "$1" || return $?
+		mirrorrepo_setup_snapshot "$1" "$2" $3 || return $?
+	fi
+	# checkout references
+	TMPWORKTREE=$(mktemp -d)
+	test -n "$TMPWORKTREE" && test -d "$TMPWORKTREE" || {
+		echo "error: could not create temporary directory to read refs-history." 1>&2
+		return 1
+	}
+	export GIT_DIR=refs-history/$REMOTE_NAME
+	export GIT_WORK_TREE="$TMPWORKTREE"
+	"$GIT" checkout "$SNAPSHOT_ID" && "$GIT" reset --hard || {
+		case "$SNAPSHOT_ID" in
+		master) echo "error: could not retrieve latest snapshot." 1>&2 ;;
+		*) echo "error: could not retrieve snapshot ID \`$SNAPSHOT_ID'." 1>&2 ;;
+		esac
+		rm -r -f "$TMPWORKTREE"
+		return 1
+	}
+	unset GIT_WORK_TREE
+	unset GIT_DIR
+	# delete old references
+	if $3
+	then
+		export GIT_DIR="$1"
+		unset GIT_WORK_TREE 2>/dev/null
+	else
+		export GIT_DIR="$1/.git"
+		export GIT_WORK_TREE="$1"
+	fi
+	"$GIT" show-ref | while read HASH NAME
+	do
+		"$GIT" update-ref -d $NAME || {
+			echo "fatal: could not delete old reference \`$NAME'. local mirror corrupted." 1>&2
+			rm -r -f "$TMPWORKTREE"
+			unset GIT_WORK_TREE 2>/dev/null
+			unset GIT_DIR
+			return 1
+		}
+	done
+	# HACK:
+	# Because invalid or empty HEAD causes fatal git error, reset HEAD to default one.
+	# This is overwritten if refs-history includes HEAD.
+	echo 'ref: refs/heads/master' >"$GIT_DIR/HEAD"
+	# read metadata and update references
+	cat "$TMPWORKTREE/refs" | while read HASH NAME
+	do
+		test $NAME = HEAD && $MIRROR_DEFAULT_HEAD && continue
+		"$GIT" update-ref --no-deref $4$NAME $HASH || {
+			echo "fatal: could not update reference \`$NAME'. local mirror corrupted." 1>&2
+			rm -r -f "$TMPWORKTREE"
+			unset GIT_WORK_TREE 2>/dev/null
+			unset GIT_DIR
+			return 1
+		}
+	done
+	unset GIT_WORK_TREE 2>/dev/null
+	unset GIT_DIR
+	rm -r -f "$TMPWORKTREE"
+	return 0
+}
+
+
+# Dispatch and run command
+case $OP in
+
+# Usage
+usage)
+	cat <<_MG_EOF
+Usage:
+	$ME COMMAND [ARGS...]
+Commands:
+	init        initialize combined repository
+	add         add remote repository
+	del         delete remote repository
+	fetch       fetch remote repository
+	fetch-all   fetch all remote repositories
+	update      update local mirror repository
+	update-all  update all local mirror repositories up to date
+	snapshot    make a snapshot
+	export      export a snapshot
+	clean       clean temporary references
+
+Use $ME help COMMAND to show how to use these commands.
+_MG_EOF
+	exit 0
+	;;
+
+# Version
+version)
+	cat <<_MG_EOF
+mirrorrepo-git version $VERSION
+$COPYRIGHT
+_MG_EOF
+	exit 0
+	;;
+
+# Help
+help)
+	case "$HELP_CMD" in
+	init)
+		cat <<_MG_EOF
+Usage (initialize combined repository):
+	$ME init
+_MG_EOF
+		;;
+	add)
+		cat <<_MG_EOF
+Usage (add remote repository):
+	$ME add NAME URL
+Arguments:
+	NAME   name of remote repository
+	URL    URL or absolute path of remote repository
+_MG_EOF
+		;;
+	del)
+		cat <<_MG_EOF
+Usage (delete remote repository):
+	$ME del NAME
+Arguments:
+	NAME   name of remote repository
+_MG_EOF
+		;;
+	fetch)
+		cat <<_MG_EOF
+Usage (fetch remote repository):
+	$ME fetch [--secure] NAME
+Arguments:
+	NAME   name of remote repository to fetch
+Options:
+	--secure
+		Use secure mode
+Parallel Safety:
+	You can run multiple fetch commands as long as
+	remote repository names are different.
+_MG_EOF
+		;;
+	fetch-all)
+		cat <<_MG_EOF
+Usage (fetch all remote repositories):
+	$ME fetch-all [--secure]
+Options:
+	--secure
+		Use secure mode
+Environment Variables:
+	MIRRORREPO_WAIT_FETCHES
+		sets how many seconds mirrorrepo-git waits between
+		multiple fetches.
+	MIRRORREPO_CONTINUE
+		if this value is not empty, mirrorrepo-git continues
+		fetching other remote repositories if an error occurs.
+_MG_EOF
+		;;
+	update)
+		cat <<_MG_EOF
+Usage (update local mirror repository):
+	$ME update NAME [SNAPSHOT_ID]
+Arguments:
+	NAME
+		name of remote repository to update (mandatory)
+	SNAPSHOT_ID
+		commit ID of snapshot fetched (optional)
+Parallel Safety:
+	You can run multiple update commands as long as
+	remote repository names are different.
+_MG_EOF
+		;;
+	update-all)
+		cat <<_MG_EOF
+Usage (update all local mirror repositories up to date):
+	$ME update-all
+Environment Variables:
+	MIRRORREPO_CONTINUE
+		if this value is not empty, mirrorrepo-git continues
+		updating other remote repositories if an error occurs.
+_MG_EOF
+		;;
+	snapshot)
+		cat <<_MG_EOF
+Usage (make a snapshot):
+	$ME snapshot REMOTE_NAME SNAPSHOT_NAME [SNAPSHOT_ID]
+Arguments:
+	REMOTE_NAME
+		name of remote repository to update (mandatory)
+	SNAPSHOT_NAME
+		name of snapshot (mandatory)
+	SNAPSHOT_ID
+		commit ID of snapshot fetched (optional)
+Parallel Safety:
+	You can run multiple snapshot commands as long as
+	remote repository names are different.
+_MG_EOF
+		;;
+	export)
+		cat <<_MG_EOF
+Usage (export a snapshot):
+	$ME export [--secure]
+		[--no-bare|--bare] [--default-head|--no-default-head] [-d]
+		REMOTE_NAME REPOSITORY_PATH [SNAPSHOT_ID]
+Arguments:
+	REMOTE_NAME
+		name of remote repository to update (mandatory)
+	REPOSITORY_PATH
+		path of exported repository (mandatory)
+	SNAPSHOT_ID
+		commit ID of snapshot fetched (optional)
+Options:
+	--secure
+		Use secure mode
+	--no-bare
+		Create non-bare repository
+	--bare
+		Create bare repository
+	--default-head
+		Revert HEAD reference to default one (on master branch)
+	--no-default-head
+		Use HEAD reference from specified snapshot (maybe in detached state)
+	-d | --development-tree
+		Shortcut for \`--no-bare --default-head'.
+		This is useful to create ordinal repository to work on.
+Parallel Safety:
+	You can run multiple export commands as long as
+	remote repository names are different.
+_MG_EOF
+		;;
+	clean)
+		cat <<_MG_EOF
+Usage (clean temporary references):
+	$ME clean
+Conflicts with:
+	fetch
+	fetch-all
+_MG_EOF
+		;;
+	*)
+		echo "error: unknown command \`$HELP_CMD'." 1>&2
+		exit 1
+		;;
+	esac
+	exit 0
+	;;
+
+# Initialize combined repository
+init)
+	"$GIT" init --bare || exit $?
+	for D in refs-history mirrors snapshots
+	do
+		mkdir -p $D || exit $?
+	done
+	touch tag.mirrorrepo || exit $?
+	;;
+
+# Add remore repository
+add)
+	# check URL (no relative path allowed)
+	if test -d "$REMOTE_URL"
+	then
+		case "$REMOTE_URL" in
+		/* | \\*) ;;
+		*)
+			echo "error: cannot use relative path \`$REMOTE_URL'. use absolute path to avoid error." 1>&2
+			exit 1
+			;;
+		esac
+	fi
+	# prepare refs-history repository and setup main repository
+	mkdir refs-history/$REMOTE_NAME || exit $?
+	GIT_DIR=refs-history/$REMOTE_NAME "$GIT" init --bare &&
+	"$GIT" remote add --no-tags $REMOTE_NAME "$REMOTE_URL" || {
+		echo "error: cannot setup remote repository." 1>&2
+		rm -r -f mirrorrepo.metadata/$REMOTE_NAME 2>/dev/null
+		exit 1
+	}
+	"$GIT" config --local remote.$REMOTE_NAME.fetch "+*:refs/mirrorrepo/$REMOTE_NAME/*" || {
+		echo "error: cannot setup remote repository." 1>&2
+		rm -r -f mirrorrepo.metadata/$REMOTE_NAME 2>/dev/null
+		"$GIT" remote remove $REMOTE_NAME ||
+			echo "fatal: cannot remove corrupted remote repository \`$REMOTE_NAME'." 1>&2
+		exit 1
+	}
+	echo "reference history repository for remote repository \`$REMOTE_NAME'; used by mirrorrepo-git" >refs-history/$REMOTE_NAME/description
+	cat 1>&2 <<_MG_EOF
+----
+If you want to change user name and email address,
+use $GIT config in $MIRRORREPO_DIR/refs-history/$REMOTE_NAME directory.
+_MG_EOF
+	;;
+
+# Delete remote repository
+del)
+	echo "warning: deleting remote repository is not recommended." 1>&2
+	echo "This program does not completely remove deleted remote references (by-design)." 1>&2
+	# delete unnecessary references
+	"$GIT" show-ref | while read HASH NAME
+	do
+		case "$NAME" in
+		refs/mirrorrepo/$REMOTE_NAME/*)
+			"$GIT" update-ref -d "$NAME" 2>/dev/null ||
+				echo "warning: could not remove reference \`$NAME'." 1>&2
+			;;
+		esac
+	done
+	rm -r -f refs/mirrorrepo/$REMOTE_NAME 2>/dev/null
+	rm -r -f mirrors/$REMOTE_NAME 2>/dev/null
+	# remove metadata
+	rm -r -f refs-history/$REMOTE_NAME &&
+	"$GIT" remote remove $REMOTE_NAME || {
+		echo "error: could not clean up \`$REMOTE_NAME'. metadata corrupted." 1>&2
+		exit 1
+	}
+	;;
+
+# Fetch remote repository
+fetch)
+	REMOTE_URL=$("$GIT" config --local --get remote.$REMOTE_NAME.url)
+	# clean temporary references
+	"$GIT" show-ref | while read HASH NAME
+	do
+		case "$NAME" in
+		refs/mirrorrepo/$REMOTE_NAME/*)
+			"$GIT" update-ref -d "$NAME" || {
+				echo "fatal: could not remove reference \`$NAME'." 1>&2
+				exit 1
+			}
+			;;
+		esac
+		exit 0
+	done || exit $?
+	rm -r -f refs/mirrorrepo/$REMOTE_NAME 2>/dev/null
+	# fetch with new references
+	FETCHDATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+	if $MIRROR_SECURE
+	then
+		echo secure mode!
+		# secure mode : clone latest snapshot and fetch from this
+		TMPREPO=$(mktemp -d)
+		test -n "$TMPREPO" && test -d "$TMPREPO" || {
+			echo "error: could not create temporary directory to fetch securely." 1>&2
+			exit 1
+		}
+		mirrorrepo_setup_snapshot "$TMPREPO" "$MIRRORREPO_DIR/objects" : || {
+			echo "error: could not configure snapshot for secure clone." 1>&2
+			rm -r -f "$TMPREPO"
+			exit 1
+		}
+		mirrorrepo_create_snapshot "$TMPREPO" "$MIRRORREPO_DIR/objects" : refs/mirrorold/$REMOTE_NAME/ ||
+			echo "note: please ignore error above (fetch might take much more but completely safe)." 1>&2
+		export GIT_DIR="$TMPREPO"
+		"$GIT" remote add --no-tags $REMOTE_NAME "$REMOTE_URL" &&
+		"$GIT" config --local remote.$REMOTE_NAME.fetch "+*:refs/mirrorrepo/$REMOTE_NAME/*" &&
+		"$GIT" fetch --no-tags $REMOTE_NAME || {
+			echo "error: could not fetch from remote." 1>&2
+			rm -r -f "$TMPREPO"
+			exit 1
+		}
+		unset GIT_DIR
+		"$GIT" fetch --no-tags "$TMPREPO" "+refs/mirrorrepo/$REMOTE_NAME/*:refs/mirrorrepo/$REMOTE_NAME/*" || {
+			echo "error: could not clone latest snapshot." 1>&2
+			echo "Fetched repository is preserved in \`$TMPREPO'." 1>&2
+			exit 2
+		}
+		rm -r -f "$TMPREPO"
+	else
+		# normal mode : just fetch using combined repository
+		"$GIT" fetch --no-tags $REMOTE_NAME || exit 1
+	fi
+	# update metadata
+	TMPWORKTREE=$(mktemp -d)
+	test -n "$TMPWORKTREE" && test -d "$TMPWORKTREE" || {
+		echo "error: could not create temporary directory to update refs-history." 1>&2
+		exit 1
+	}
+	export GIT_DIR=refs-history/$REMOTE_NAME
+	export GIT_WORK_TREE="$TMPWORKTREE"
+	"$GIT" checkout master || "$GIT" checkout --orphan master || {
+		echo "fatal: cannot checkout from refs-history repository." 1>&2
+		rm -r -f "$TMPWORKTREE"
+		exit 1
+	}
+	"$GIT" rm -rfq --ignore-unmatch -- . 2>/dev/null
+	test ! -f "$TMPWORKTREE/refs" && touch "$TMPWORKTREE/refs" || {
+		echo "fatal: cannot prepare to update refs-history repository." 1>&2
+		rm -r -f "$TMPWORKTREE"
+		exit 1
+	}
+	unset GIT_WORK_TREE
+	unset GIT_DIR
+	# TODO : can this block be much safer?
+	"$GIT" show-ref | while read HASH NAME
+	do
+		case "$NAME" in
+		refs/mirrorrepo/$REMOTE_NAME/*)
+			# update refs-history
+			echo "$HASH ${NAME##refs/mirrorrepo/$REMOTE_NAME/}" >>"$TMPWORKTREE/refs"
+			# prevent GC
+			TYPE=$("$GIT" cat-file -t $HASH)
+			"$GIT" tag mirrorrepo/$TYPE.$HASH $HASH 2>/dev/null
+			;;
+		esac
+	done
+	# commit new refs-history
+	export GIT_DIR=refs-history/$REMOTE_NAME
+	export GIT_WORK_TREE="$TMPWORKTREE"
+	"$GIT" add "$TMPWORKTREE/refs" && "$GIT" commit --allow-empty -m "[$FETCHDATE] Fetched from $REMOTE_URL" || {
+		echo "fatal: cannot update refs-history repository." 1>&2
+		rm -r -f "$TMPWORKTREE"
+		exit 1
+	}
+	unset GIT_WORK_TREE
+	unset GIT_DIR
+	rm -r -f "$TMPWORKTREE"
+	exit 0
+	;;
+
+# Fetch all remote repositories
+fetch-all)
+	# iterate over all remotes
+	"$GIT" remote >/dev/null || exit 3
+	"$GIT" remote | while read REMOTE
+	do
+		if $MIRROR_SECURE
+		then
+			ARGS="--secure $REMOTE"
+		else
+			ARGS=$REMOTE
+		fi
+		$ME fetch $ARGS || {
+			R=$?
+			test -n "$MIRRORREPO_CONTINUE" && continue
+			exit $R
+		}
+		test 0 -eq $MIRRORREPO_WAIT_FETCHES || sleep $MIRRORREPO_WAIT_FETCHES
+	done
+	exit 0
+	;;
+
+# Update local mirror repository
+update)
+	mirrorrepo_create_snapshot mirrors/$REMOTE_NAME ../../../objects : "" || exit $?
+	;;
+
+# Update all local mirror repositories
+update-all)
+	# iterate over all remotes
+	"$GIT" remote >/dev/null || exit $?
+	"$GIT" remote | while read REMOTE
+	do
+		$ME update $REMOTE || {
+			test -n "$MIRRORREPO_CONTINUE" && continue
+			exit 1
+		}
+	done
+	;;
+
+# Make a snapshot
+snapshot)
+	mirrorrepo_validate_name "$SNAPSHOT_NAME" snapshot || exit $?
+	mirrorrepo_create_snapshot snapshots/$SNAPSHOT_NAME ../../../objects "" || exit $?
+	;;
+
+# Export a snapshot
+export)
+	# make output repository
+	cd "$FIRSTPWD" && mkdir "$SNAPSHOT_NAME" || exit $?
+	cd "$SNAPSHOT_NAME" || {
+		rm -r -f "$SNAPSHOT_NAME"
+		exit 1
+	}
+	SNAPSHOT_NAME=$(pwd)
+	cd "$MIRRORREPO_DIR" || {
+		rm -r -f "$SNAPSHOT_NAME"
+		exit 1
+	}
+	# setup snapshot repository
+	mirrorrepo_setup_snapshot "$SNAPSHOT_NAME" "$MIRRORREPO_DIR/objects" $MIRROR_EXPORT_BARE &&
+	mirrorrepo_create_snapshot "$SNAPSHOT_NAME" "$MIRRORREPO_DIR/objects" $MIRROR_EXPORT_BARE "" || {
+		echo "error: could not configure exported snapshot." 1>&2
+		rm -r -f "$SNAPSHOT_NAME"
+		exit 1
+	}
+	if $MIRROR_EXPORT_BARE
+	then
+		export GIT_DIR="$SNAPSHOT_NAME"
+		unset GIT_WORK_TREE 2>/dev/null
+	else
+		export GIT_DIR="$SNAPSHOT_NAME/.git"
+		export GIT_WORK_TREE="$SNAPSHOT_NAME"
+	fi
+	if $MIRROR_SECURE
+	then
+		# secure mode : repack all objects non-locally and remove alternate link
+		"$GIT" repack -a && rm -f "$GIT_DIR/objects/info/alternates" || {
+			echo "error: failed to make exported snapshot secure." 1>&2
+			rm -r -f "$SNAPSHOT_NAME"
+			unset GIT_WORK_TREE 2>/dev/null
+			unset GIT_DIR
+			exit 1
+		}
+	fi
+	# reset HEAD (if appliciable)
+	$MIRROR_EXPORT_BARE || git reset --hard
+	unset GIT_WORK_TREE 2>/dev/null
+	unset GIT_DIR
+	exit 0
+	;;
+
+# Clean temporary references
+clean)
+	"$GIT" show-ref | while read HASH NAME
+	do
+		case "$NAME" in
+		refs/mirrorrepo/*)
+			"$GIT" update-ref -d "$NAME" 2>/dev/null ||
+				echo "warning: could not remove reference \`$NAME'." 1>&2
+			;;
+		esac
+	done
+	rm -r -f refs/mirrorrepo 2>/dev/null
+	exit 0
+	;;
+esac
