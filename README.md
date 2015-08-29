@@ -30,16 +30,16 @@ There are three reasons why I need to make this tool.
 First reason is that `git fetch` is (basically) not aware of deleted
 branches and tags. I needed to grab exact state of remote repository.
 
-Second reason: sometimes branches are overwritten (by forced update)
+Second reason: sometimes branches/tags are overwritten (by forced update)
 and old trees can be lost. When I was working with multiple Linux SoC
-repositories, I found a branch is gone and replaced by completely
-different one. I wanted history to be preserved, forever.
+repositories, I found a branch is replaced by completely different one.
+I wanted history to be preserved, forever.
 
 Third reason: this tool can save your disk space. If you are working
 with multiple Linux-kernel repositories, you'll find that most contents
 are the same. A git repository is basically a delta-compressed object
 storage and we can store contents of multiple repositories and
-save disk space (as how this tool achieves).
+save disk space (by sharing contents, as this tool achieves).
 
 
 Required Environment
@@ -58,7 +58,7 @@ Data archived/not archived by this tool
 ----------------------------------------
 
 Data archived:
-*	Snapshot of all references including...
+*	Snapshot of all git references including...
 	*	Branches
 	*	Tags
 	*	Notes
@@ -68,7 +68,7 @@ Data archived:
 
 Data not archived:
 *	Symbolic references  
-	Because `git upload-pack` sends all references as SHA-1 ID,
+	Because `git upload-pack` sends all git references as SHA-1 ID,
 	this tool (and all `git fetch`-based tools) cannot preserve
 	remote symbolic references.
 *	Repository description  
@@ -76,13 +76,13 @@ Data not archived:
 	Sometimes, we don't have a way to retrieve remote description.
 
 
-How to use it?
----------------
+How to use it? (examples)
+--------------------------
 
 First, you need to create your directory.
 
-	$ mkdir repository
-	$ cd repository
+	$ mkdir linux-kernels
+	$ cd linux-kernels
 	$ mirrorrepo-git init
 
 You will need to add remote repository.
@@ -93,14 +93,14 @@ You might want to add multiple repositories.
 
 	$ mirrorrepo-git add linux-next git://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git
 
-You can remove remote references but not recommended because mirrorrepo-git
-does not try to remove references to deleted remote repository.
-But it might be helpful if you need to rename the remote name.
+You can remove remote repository but not recommended because mirrorrepo-git
+does not try to remove git references associated to deleted repository.
+But it might be helpful if you need to rename a remote name.
 
 	$ mirrorrepo-git del linux-next
 	$ mirrorrepo-git add korg-next git://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git
 
-You can fetch repository using `fetch` command.
+You can fetch a remote repository using `fetch` command.
 
 	$ mirrorrepo-git fetch korg
 
@@ -137,8 +137,8 @@ you can create frozen snapshot.
 
 You can find snapshot at `snapshots/korg-snapshot-1`.
 
-If you want to export this repository, use `export` command.
-To export as snapshot state (default):
+If you want to export a snapshot, use `export` command.
+To export as `snapshot` state (default):
 
 	$ mirrorrepo-git export korg /path/to/repository.git 01234567
 
@@ -152,34 +152,36 @@ Detached (secure) repository can be securely copied to another machine.
 Combined Repository Format
 ---------------------------
 
-By running `mirrorrepo-git init` command, it creates a bare git repository
-which contains all archived objects on the current directory.
+By running `init` command, it creates a combined repository
+which has a bare git repository which contains all archived objects
+on the current directory.
 
-In the combined repository directory, there are some other
-bare repositories.
+In the combined repository directory,
+there are some other bare repositories.
 
 *	refs-history/NAME  
 	Repository which holds all reference information in the "refs" file.
 	It's used when making mirrors and updated on fetch.
 *	mirrors/NAME  
-	Default mirror repository updated on `mirrorrepo-git update` command.
+	Local mirrors created and updated on `update` command.
 *	snapshots/NAME  
-	Snapshots created by `mirrorrepo-git snapshot` command.
+	Snapshots created by `snapshot` command.
 
 
 Security Considerations
 ------------------------
 
 When fetching from remote repositories, it can leak other remote
-repository's information. This is the default behavior. If you set
+repositories' information. This is the default behavior. If you set
 `--secure` flag when fetching from remote, mirrorrepo-git uses a bit
-inefficient techniques to fetch remote objects (not as inefficient as
-holding whole local repositories per remote).
+inefficient way to fetch remote objects (not as inefficient as holding
+whole local repository per remote).
 
-When fetching from local mirrors, it can leak other mirror repository's
+When fetching from local mirrors/snapshots, it can leak other repositories'
 information. This is by-design. If you don't want to leak such information,
-just export a repository with `--secure` flag. Secure-exported repository no
-longer shares object storage and no information leaks should occur.
+just export a repository with `--secure` flag. Exported repository
+(with `--secure` flag) no longer shares object storage and
+no information leaks should occur.
 
 
 License
